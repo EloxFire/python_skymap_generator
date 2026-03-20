@@ -7,14 +7,15 @@ from matplotlib.backends.backend_pdf import PdfPages
 from matplotlib.patches import Polygon
 from matplotlib.transforms import Bbox
 from matplotlib import font_manager as fm
+import matplotlib.image as mpimg
 
 # ============================================================
 # PARAMÈTRES
 # ============================================================
 LATITUDE = 45
-MAX_MAGNITUDE = 4
+MAX_MAGNITUDE = 4.5
 LABEL_MAG_LIMIT = 1  # seuil pour afficher le nom des étoiles
-STAR_LABEL_GAP_PT = 1  # espace visuel constant entre le bord du marqueur et son libellé
+STAR_LABEL_GAP_PT = 2  # espace visuel constant entre le bord du marqueur et son libellé
 LABEL_COLLISION_PADDING_PX = 0
 STAR_DOT_COLLISION_PADDING_PX = 1.0
 
@@ -22,6 +23,30 @@ STAR_DOT_COLLISION_PADDING_PX = 1.0
 CONSTELLATIONS_FILE = "constellations_fr.json"
 DRAW_CONSTELLATION_BOUNDARIES = False
 DRAW_CONSTELLATION_LABELS = True
+
+# ============================================================
+# FORÇAGE DES LABELS
+# ============================================================
+# Constellations : labels toujours affichés (même si collision avec des dots d'étoiles)
+FORCED_CONSTELLATION_NAMES = [
+    "Hercule",
+    "Bouvier",
+    "Couronne\nBoréale",
+    "Poissons",
+    "Gémeaux",
+    "Tête du\nSerpent",
+    "Queue du\nSerpent",
+    "Cygne",
+    "Grand Chien",
+]
+
+# Étoiles : labels toujours affichés (même si collision avec un dot d'étoile)
+# -> Mets ici les noms affichés (ex: "Polaris", "Sirius", ...)
+FORCED_STAR_NAMES = [
+    "Polaris",
+    "Arcturus",
+    "Spica"
+]
 
 # Clipping
 CLIP_SKY = True
@@ -53,6 +78,12 @@ DRAW_ZENITH_MARKER = True
 ZENITH_MARKER_RADIUS = 1.2
 ZENITH_MARKER_COLOR = "#FF0000"
 
+# Petite croix rouge au centre du cercle externe (page 2)
+DRAW_PAGE2_CENTER_CROSS = True
+PAGE2_CENTER_CROSS_HALF_SIZE = 1.2
+PAGE2_CENTER_CROSS_LW = 1.0
+PAGE2_CENTER_CROSS_COLOR = "#FF0000"
+
 # ============================================================
 # POLICE PERSONNALISÉE
 # ============================================================
@@ -68,6 +99,23 @@ dmmono = fm.FontProperties(fname=DMMONO_FONT_PATH)
 fm.fontManager.addfont(GILROY_BLACK_FONT_PATH)
 fm.fontManager.addfont(GILROY_MEDIUM_FONT_PATH)
 fm.fontManager.addfont(DMMONO_FONT_PATH)
+
+# ------------------------------------------------------------
+# Mise en page A4 / marges d'impression
+# ------------------------------------------------------------
+A4_WIDTH_CM = 21.0
+A4_HEIGHT_CM = 29.7
+CM_PER_INCH = 2.54
+PRINT_MARGIN_CM = 0.5
+
+
+# ============================================================
+# LOGO (page 2)
+# ============================================================
+LOGO_PATH = "assets/LOGO_WHITE.png"
+LOGO_SIZE = 0.20         # taille relative (0.1 = petit, 0.2 = grand)
+LOGO_X = 0.50            # position horizontale (0 gauche → 1 droite)
+LOGO_Y = 0.65            # position verticale (0 bas → 1 haut)
 
 # ------------------------------------------------------------
 # Bandes des anneaux (multiples de max_radius)
@@ -121,14 +169,6 @@ DRAW_BLUE_BAND = True
 PINK_COLOR = "#000000"
 BLUE_COLOR = "#FFFFFF"
 BAND_ALPHA = 1.0
-
-# ------------------------------------------------------------
-# Mise en page A4 / marges d'impression
-# ------------------------------------------------------------
-A4_WIDTH_CM = 21.0
-A4_HEIGHT_CM = 29.7
-CM_PER_INCH = 2.54
-PRINT_MARGIN_CM = 1
 
 # Plus grand carré imprimable avec marge mini de 1.5 cm
 MAP_SIDE_CM = min(
@@ -329,7 +369,7 @@ def padded_bbox(bbox, pad_px=0.0):
     )
 
 
-def register_text_if_no_overlap(ax, text_artist, occupied_bboxes, renderer=None, pad_px=0.0, register_bbox=True):
+def register_text_if_no_overlap(ax, text_artist, occupied_bboxes, renderer=None, pad_px=0.0, register_bbox=True, extra_bboxes=None):
     if occupied_bboxes is None:
         return True
 
@@ -338,7 +378,12 @@ def register_text_if_no_overlap(ax, text_artist, occupied_bboxes, renderer=None,
         renderer = ax.figure.canvas.get_renderer()
 
     bbox = padded_bbox(text_artist.get_window_extent(renderer=renderer), pad_px=pad_px)
-    for used in occupied_bboxes:
+    for used in (occupied_bboxes or []):
+        if bbox.overlaps(used):
+            text_artist.remove()
+            return False
+
+    for used in (extra_bboxes or []):
         if bbox.overlaps(used):
             text_artist.remove()
             return False
@@ -348,7 +393,7 @@ def register_text_if_no_overlap(ax, text_artist, occupied_bboxes, renderer=None,
     return True
 
 
-def place_star_label(ax, x, y, label, marker_area_points2, occupied_bboxes, renderer,
+def place_star_label(ax, x, y, label, marker_area_points2, occupied_bboxes, renderer, extra_bboxes=None,
                      clip_patch=None, disk_R=None, fontsize=5, collision_pad_px=0.0):
     """
     Placement anti-chevauchement pour les labels d'étoiles, en restant le plus proche possible du point de base.
@@ -410,6 +455,7 @@ def place_star_label(ax, x, y, label, marker_area_points2, occupied_bboxes, rend
                 occupied_bboxes=occupied_bboxes,
                 renderer=renderer,
                 pad_px=collision_pad_px,
+                extra_bboxes=extra_bboxes,
                 register_bbox=True,
             )
             if ok:
@@ -567,6 +613,7 @@ def draw_constellation_label(
     occupied_bboxes=None,
     renderer=None,
     collision_pad_px=0.0,
+    extra_bboxes=None,
 ):
     """
     Place un label de constellation au plus proche possible du centrum, sans chevauchement.
@@ -621,6 +668,7 @@ def draw_constellation_label(
                 occupied_bboxes=occupied_bboxes,
                 renderer=renderer,
                 pad_px=collision_pad_px,
+                extra_bboxes=extra_bboxes,
                 register_bbox=False,
             )
             if not ok:
@@ -981,14 +1029,14 @@ with PdfPages("output/starmap.pdf") as pdf:
     fig.canvas.draw()
     label_renderer = fig.canvas.get_renderer()
 
-    # Obstacles = marqueurs d'étoiles (pour empêcher les collisions)
-    star_obstacle_bboxes = []
+    # Obstacles = DOTS (points d'étoiles) uniquement
+    star_dot_bboxes = []
     for star in visible_stars:
         x_star, y_star = project_star(star["ra"], star["dec"])
         if not is_inside_disk_xy(x_star, y_star, max_radius):
             continue
         _, marker_area_star, _ = star_marker_style(star)
-        star_obstacle_bboxes.append(
+        star_dot_bboxes.append(
             marker_bbox_from_data(
                 ax,
                 x_star,
@@ -997,6 +1045,10 @@ with PdfPages("output/starmap.pdf") as pdf:
                 pad_px=STAR_DOT_COLLISION_PADDING_PX,
             )
         )
+
+
+    # Obstacles = TEXTES déjà placés (étoiles + constellations)
+    label_bboxes = []
 
     # Horizon (optionnel)
     # horizon_line, = ax.plot(x_hor, y_hor, linewidth=1, color="black", alpha=1.0)
@@ -1031,14 +1083,18 @@ with PdfPages("output/starmap.pdf") as pdf:
         # Note: Polaris (ids "Lodestar") est toujours labellisée, même si sa magnitude dépasse le seuil.
         if name and (name == "Lodestar" or star["V"] <= LABEL_MAG_LIMIT):
             display_name = "Polaris" if name == "Lodestar" else name
+
+            forced_star = (display_name in FORCED_STAR_NAMES)
+
             place_star_label(
                 ax=ax,
                 x=x,
                 y=y,
                 label=display_name,
                 marker_area_points2=marker_area,
-                occupied_bboxes=star_obstacle_bboxes,
+                occupied_bboxes=label_bboxes,
                 renderer=label_renderer,
+                extra_bboxes=None if forced_star else star_dot_bboxes,
                 clip_patch=clip_circle,
                 disk_R=max_radius,
                 fontsize=5,
@@ -1048,6 +1104,7 @@ with PdfPages("output/starmap.pdf") as pdf:
     # Labels de constellations (après les étoiles => priorité aux labels d'étoiles)
     if constellation_labels:
         for centrum, cname in constellation_labels:
+            forced_const = (cname in FORCED_CONSTELLATION_NAMES)
             draw_constellation_label(
                 ax,
                 centrum,
@@ -1056,9 +1113,10 @@ with PdfPages("output/starmap.pdf") as pdf:
                 R=max_radius,
                 fontsize=5,
                 alpha=1,
-                occupied_bboxes=star_obstacle_bboxes,
+                occupied_bboxes=label_bboxes,
                 renderer=label_renderer,
                 collision_pad_px=LABEL_COLLISION_PADDING_PX,
+                extra_bboxes=None if forced_const else star_dot_bboxes,
             )
 
     # ------------------------------------------------------------
@@ -1182,6 +1240,23 @@ with PdfPages("output/starmap.pdf") as pdf:
     disk = plt.Circle((0, 0), max_radius, fill=True, color=MASK_COLOR, linewidth=0)
     ax2.add_patch(disk)
 
+    if DRAW_PAGE2_CENTER_CROSS:
+        s = PAGE2_CENTER_CROSS_HALF_SIZE
+        ax2.plot(
+            [-s, s], [0, 0],
+            color=PAGE2_CENTER_CROSS_COLOR,
+            linewidth=PAGE2_CENTER_CROSS_LW,
+            zorder=30,
+            solid_capstyle="round",
+        )
+        ax2.plot(
+            [0, 0], [-s, s],
+            color=PAGE2_CENTER_CROSS_COLOR,
+            linewidth=PAGE2_CENTER_CROSS_LW,
+            zorder=30,
+            solid_capstyle="round",
+        )
+
     hx = np.asarray(x_hor)
     hy = np.asarray(y_hor)
     wx, wy = build_horizon_window_polygon(hx, hy, max_radius)
@@ -1244,6 +1319,25 @@ with PdfPages("output/starmap.pdf") as pdf:
         ha="center",
         fontsize=14,
     )
+
+    # ------------------------------------------------------------
+    # Logo page 2
+    # ------------------------------------------------------------
+    if os.path.exists(LOGO_PATH):
+        logo = mpimg.imread(LOGO_PATH)
+
+        h, w = logo.shape[0], logo.shape[1]
+        ratio = h / w
+
+        width = LOGO_SIZE
+        height = LOGO_SIZE * ratio
+
+        ax_logo = fig2.add_axes([LOGO_X - width/2, LOGO_Y, width, height])
+        ax_logo.imshow(logo, interpolation="none")
+        ax_logo.axis("off")
+
+    else:
+        print(f"Logo not found at path: {LOGO_PATH}")
 
     pdf.savefig(fig2)
     plt.close(fig2)

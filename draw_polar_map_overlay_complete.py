@@ -1,6 +1,5 @@
 import os
 import json
-import math
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
@@ -12,11 +11,33 @@ from matplotlib import font_manager as fm
 # PARAMÈTRES
 # ============================================================
 LATITUDE = 45
-MAX_MAGNITUDE = 4
+MAX_MAGNITUDE = 3
 LABEL_MAG_LIMIT = 1  # seuil pour afficher le nom des étoiles
 STAR_LABEL_GAP_PT = 1  # espace visuel constant entre le bord du marqueur et son libellé
 LABEL_COLLISION_PADDING_PX = 0
 STAR_DOT_COLLISION_PADDING_PX = 1.0
+
+
+# ------------------------------------------------------------
+# FORÇAGE D'AFFICHAGE DE LABELS
+# ------------------------------------------------------------
+# Ces listes permettent de forcer l'affichage de certains labels.
+# - Si un label est forcé, on tente d'abord un placement sans chevauchement.
+# - Si aucune place "propre" n'est trouvée, le label est quand même affiché (overlap autorisé).
+#
+# IMPORTANT : les comparaisons sont insensibles à la casse et aux espaces en début/fin.
+FORCE_STAR_LABELS = [
+    # Exemples :
+    # "Polaris",
+    # "Vega",
+]
+
+FORCE_CONSTELLATION_LABELS = [
+    # Exemples :
+    # "Orion",
+    # "Grande Ourse",
+]
+
 
 # Constellations
 CONSTELLATIONS_FILE = "constellations_fr.json"
@@ -193,6 +214,22 @@ visible_stars = [
 def extract_star_name(ids_string):
     if not ids_string:
         return None
+
+
+
+def _norm_label_name(s: str) -> str:
+    return (s or "").strip().lower()
+
+
+def is_forced_star_label(name: str) -> bool:
+    n = _norm_label_name(name)
+    return n in {_norm_label_name(x) for x in FORCE_STAR_LABELS}
+
+
+def is_forced_constellation_label(name: str) -> bool:
+    n = _norm_label_name(name)
+    return n in {_norm_label_name(x) for x in FORCE_CONSTELLATION_LABELS}
+
     parts = str(ids_string).split("|")
     for p in parts:
         if p.startswith("NAME "):
@@ -253,6 +290,7 @@ def data_offset_from_points(ax, x, y, dx_pt=0.0, dy_pt=0.0):
     return ax.transData.inverted().transform((tx_px, ty_px))
 
 
+
 def screen_basis_vectors(ax, x, y):
     """Retourne (radial_unit_px, tangential_unit_px) en coordonnées écran (pixels)."""
     x_px, y_px = ax.transData.transform((x, y))
@@ -310,50 +348,12 @@ def outward_space_points(ax, x, y, disk_R):
     return max(0.0, proj_px * pt_per_px)
 
 
-def offset_tangential(x, y, delta):
-    r = np.hypot(x, y)
-    if r == 0:
-        return x, y
-    tx, ty = -y / r, x / r
-    return x + tx * delta, y + ty * delta
-
-
-def padded_bbox(bbox, pad_px=0.0):
-    if pad_px <= 0:
-        return bbox
-    return Bbox.from_extents(
-        bbox.x0 - pad_px,
-        bbox.y0 - pad_px,
-        bbox.x1 + pad_px,
-        bbox.y1 + pad_px,
-    )
-
-
-def register_text_if_no_overlap(ax, text_artist, occupied_bboxes, renderer=None, pad_px=0.0, register_bbox=True):
-    if occupied_bboxes is None:
-        return True
-
-    if renderer is None:
-        ax.figure.canvas.draw()
-        renderer = ax.figure.canvas.get_renderer()
-
-    bbox = padded_bbox(text_artist.get_window_extent(renderer=renderer), pad_px=pad_px)
-    for used in occupied_bboxes:
-        if bbox.overlaps(used):
-            text_artist.remove()
-            return False
-
-    if register_bbox:
-        occupied_bboxes.append(bbox)
-    return True
-
-
 def place_star_label(ax, x, y, label, marker_area_points2, occupied_bboxes, renderer,
                      clip_patch=None, disk_R=None, fontsize=5, collision_pad_px=0.0):
     """
     Placement anti-chevauchement pour les labels d'étoiles, en restant le plus proche possible du point de base.
     - priorité aux étoiles : appelé avant les constellations.
-    - évite l'effet "plus près du bord => plus loin" en testant d'abord des positions compatibles avec l'espace
+    - évite l'effet "plus près du bord => plus loin" en testant d'abord des positions *compatibles* avec l'espace
       disponible vers l'extérieur (si manque de place, on privilégie l'intérieur du disque).
     """
     if not label:
@@ -416,6 +416,44 @@ def place_star_label(ax, x, y, label, marker_area_points2, occupied_bboxes, rend
                 return t
 
     return None
+
+
+def offset_tangential(x, y, delta):
+    r = np.hypot(x, y)
+    if r == 0:
+        return x, y
+    tx, ty = -y / r, x / r
+    return x + tx * delta, y + ty * delta
+
+
+def padded_bbox(bbox, pad_px=0.0):
+    if pad_px <= 0:
+        return bbox
+    return Bbox.from_extents(
+        bbox.x0 - pad_px,
+        bbox.y0 - pad_px,
+        bbox.x1 + pad_px,
+        bbox.y1 + pad_px,
+    )
+
+
+def register_text_if_no_overlap(ax, text_artist, occupied_bboxes, renderer=None, pad_px=0.0, register_bbox=True):
+    if occupied_bboxes is None:
+        return True
+
+    if renderer is None:
+        ax.figure.canvas.draw()
+        renderer = ax.figure.canvas.get_renderer()
+
+    bbox = padded_bbox(text_artist.get_window_extent(renderer=renderer), pad_px=pad_px)
+    for used in occupied_bboxes:
+        if bbox.overlaps(used):
+            text_artist.remove()
+            return False
+
+    if register_bbox:
+        occupied_bboxes.append(bbox)
+    return True
 
 
 def star_marker_style(star):
@@ -548,14 +586,6 @@ def draw_boundaries(ax, boundary_loops, clip_patch=None, R=None, linewidth=0.45,
         flush()
 
 
-def offset_radially(x, y, delta):
-    r = np.hypot(x, y)
-    if r == 0:
-        return x, y
-    ux, uy = x / r, y / r
-    return x + ux * delta, y + uy * delta
-
-
 def draw_constellation_label(
     ax,
     centrum,
@@ -567,31 +597,20 @@ def draw_constellation_label(
     occupied_bboxes=None,
     renderer=None,
     collision_pad_px=0.0,
+    allow_overlap=False,
 ):
-    """
-    Place un label de constellation au plus proche possible du centrum, sans chevauchement.
-    - la liste occupied_bboxes est partagée avec les étoiles (points + labels).
-    """
     if not centrum or "ra" not in centrum or "dec" not in centrum:
-        return None
+        return
     if not is_valid_coord(centrum["ra"], centrum["dec"]):
-        return None
+        return
 
-    if renderer is None:
-        ax.figure.canvas.draw()
-        renderer = ax.figure.canvas.get_renderer()
-
-    x0, y0 = project_star(float(centrum["ra"]), float(centrum["dec"]))
-
-    radial_offsets = [0.0, 1.2, -1.2, 2.5, -2.5, 4.0, -4.0, 6.0, -6.0, 8.0, -8.0]
-    tangential_offsets = [0.0, -1.5, 1.5, -3.0, 3.0, -4.5, 4.5, -6.0, 6.0]
-
-    best = None
-    best_d2 = None
-    best_bbox = None
+    x, y = project_star(float(centrum["ra"]), float(centrum["dec"]))
+    radial_offsets = [0.0, 1.5, -1.5, 3.0, -3.0, 5.0, -5.0, 7.0, -7.0]
+    tangential_offsets = [0.0, -2.0, 2.0, -4.0, 4.0]
+    kept_label = None
 
     for radial_delta in radial_offsets:
-        rx, ry = offset_radially(x0, y0, radial_delta)
+        rx, ry = offset_radially(x, y, radial_delta)
         for tang_delta in tangential_offsets:
             tx, ty = offset_tangential(rx, ry, tang_delta)
 
@@ -610,38 +629,22 @@ def draw_constellation_label(
                 va="center",
                 alpha=alpha,
                 color="black",
-                fontproperties=gilroy_medium,
-                zorder=60,
             )
             clip_artist(t, clip_patch)
 
-            ok = register_text_if_no_overlap(
+            if register_text_if_no_overlap(
                 ax,
                 t,
                 occupied_bboxes=occupied_bboxes,
                 renderer=renderer,
                 pad_px=collision_pad_px,
                 register_bbox=False,
-            )
-            if not ok:
-                continue
+            ):
+                if kept_label is not None:
+                    kept_label.remove()
+                kept_label = t
 
-            d2 = (tx - x0) ** 2 + (ty - y0) ** 2
-            bbox = padded_bbox(t.get_window_extent(renderer=renderer), pad_px=collision_pad_px)
-
-            if best is None or d2 < best_d2:
-                if best is not None:
-                    best.remove()
-                best = t
-                best_d2 = d2
-                best_bbox = bbox
-            else:
-                t.remove()
-
-    if best is not None and occupied_bboxes is not None and best_bbox is not None:
-        occupied_bboxes.append(best_bbox)
-
-    return best
+    return kept_label
 
 
 # ============================================================
@@ -688,6 +691,7 @@ def build_horizon_window_polygon(hx, hy, radius):
     ax_d1, ay_d1 = arc_points(radius, a0, a1, n=700)  # a0 -> a1
     ax_d2, ay_d2 = arc_points(radius, a1, a0, n=700)  # a1 -> a0
 
+    # fenêtre = horizon (p0->p1) + arc (p1->p0)
     x1 = np.concatenate([hx, ax_d2, [hx[0]]])
     y1 = np.concatenate([hy, ay_d2, [hy[0]]])
 
@@ -721,21 +725,23 @@ def hour_to_xy(R, hour_float):
 
 
 def draw_hour_ring(ax, R_text, R_tick_out, R_tick_in_15, R_tick_in_30, R_tick_in_60):
+    # ticks toutes les 15 min (96 ticks)
     for k in range(0, 24 * 4):
         h = k / 4.0
-        x0, y0 = hour_to_xy(R_tick_out, h)
-        if k % 4 == 0:
+        x0, y0 = hour_to_xy(R_tick_out, h)   # base (bord interne)
+        if k % 4 == 0:        # heure pleine
             Rin = R_tick_in_60
             lw = 1.0
-        elif k % 2 == 0:
+        elif k % 2 == 0:      # demi-heure
             Rin = R_tick_in_30
             lw = 0.9
-        else:
+        else:                 # quart d'heure
             Rin = R_tick_in_15
             lw = 0.7
-        x1, y1 = hour_to_xy(Rin, h)
+        x1, y1 = hour_to_xy(Rin, h)          # pointe (vers l'extérieur)
         ax.plot([x0, x1], [y0, y1], linewidth=lw, color="black", alpha=0.95)
 
+    # labels toutes les 30 min (48 labels)
     for k in range(0, 24 * 2):
         h = k / 2.0
         x, y = hour_to_xy(R_text, h)
@@ -744,6 +750,7 @@ def draw_hour_ring(ax, R_text, R_tick_out, R_tick_in_15, R_tick_in_30, R_tick_in
         mm = 30 if (k % 2 == 1) else 0
         label = f"{hh:02d}h" if mm == 0 else f"{hh:02d}h{mm:02d}"
 
+        # Lisible "au-dessus" (côté extérieur) comme sur ton exemple :
         rot = get_tangent_rotation(x, y) + 180
         ax.text(
             x, y, label,
@@ -777,6 +784,14 @@ def pick_horizon_point_near_direction(hx, hy, target_vec):
     return float(hx[i]), float(hy[i]), i
 
 
+def offset_radially(x, y, delta):
+    r = np.hypot(x, y)
+    if r == 0:
+        return x, y
+    ux, uy = x / r, y / r
+    return x + ux * delta, y + uy * delta
+
+
 def get_polyline_tangent_rotation(px, py, idx):
     px = np.asarray(px)
     py = np.asarray(py)
@@ -796,6 +811,7 @@ def get_polyline_tangent_rotation(px, py, idx):
     dy = float(py[i1] - py[i0])
     angle = np.degrees(np.arctan2(dy, dx))
 
+    # Garde le texte lisible (évite les rotations tête en bas)
     if angle > 90:
         angle -= 180
     elif angle < -90:
@@ -805,6 +821,7 @@ def get_polyline_tangent_rotation(px, py, idx):
 
 
 def get_zenith_xy(latitude_deg):
+    # Dans ce repère local, le zénith est à H=0 et dec=latitude.
     r_zen = 90.0 - float(latitude_deg)
     return 0.0, -r_zen
 
@@ -877,6 +894,8 @@ def draw_horizon_top_text(ax, text, radius, padding):
 
 
 def draw_cardinals_on_horizon(ax, hx, hy, delta_out):
+    # Convention demandée :
+    # N en haut, E à gauche, S en bas, O à droite
     card = [
         ("Nord", (0, 1)),
         ("Est", (-1, 0)),
@@ -939,7 +958,7 @@ def draw_cut_circle(ax, radius):
         linewidth=CUT_CIRCLE_LW,
         linestyle=CUT_CIRCLE_STYLE,
         color=CUT_CIRCLE_COLOR,
-        zorder=1000,
+        zorder=1000,  # au-dessus de tout
     )
     ax.add_patch(c)
 
@@ -947,19 +966,33 @@ def draw_cut_circle(ax, radius):
 # ============================================================
 # EXPORT PDF
 # ============================================================
+
 os.makedirs("output", exist_ok=True)
 
-with PdfPages("output/starmap.pdf") as pdf:
+final_pdf = "output/starmap.pdf"
+tmp_pdf = "output/starmap.tmp.pdf"
+
+# Nettoyage d'un ancien fichier temporaire
+if os.path.exists(tmp_pdf):
+    try:
+        os.remove(tmp_pdf)
+    except OSError:
+        pass
+
+with PdfPages(tmp_pdf) as pdf:
+
     # ======================
-    # PAGE 1 : CARTE DU CIEL + ZONE ROSE (MOIS + JOURS)
+    # PAGE 1 : CARTE DU CIEL + ZONE ROSE
     # ======================
     fig = plt.figure(figsize=FIGURE_SIZE_A4_IN)
     ax = fig.add_axes([MARGIN_LEFT, MARGIN_BOTTOM, MARGIN_WIDTH, MARGIN_HEIGHT])
+
     ax.set_xlim(-outer_radius, outer_radius)
     ax.set_ylim(-outer_radius, outer_radius)
     ax.set_aspect("equal")
     ax.axis("off")
 
+    # Rayons des bords de la zone rose
     R_pink_in = max_radius * PINK_IN
     R_pink_out = max_radius * PINK_OUT
 
@@ -981,7 +1014,6 @@ with PdfPages("output/starmap.pdf") as pdf:
     fig.canvas.draw()
     label_renderer = fig.canvas.get_renderer()
 
-    # Obstacles = marqueurs d'étoiles (pour empêcher les collisions)
     star_obstacle_bboxes = []
     for star in visible_stars:
         x_star, y_star = project_star(star["ra"], star["dec"])
@@ -998,11 +1030,9 @@ with PdfPages("output/starmap.pdf") as pdf:
             )
         )
 
-    # Horizon (optionnel)
-    # horizon_line, = ax.plot(x_hor, y_hor, linewidth=1, color="black", alpha=1.0)
-    # clip_artist(horizon_line, clip_circle)
+    occupied_bboxes = star_obstacle_bboxes
 
-    # Constellations : lignes d'abord, labels après les étoiles (priorité aux étoiles)
+    # Constellations
     constellation_labels = []
     if constellations:
         for c in constellations:
@@ -1011,15 +1041,15 @@ with PdfPages("output/starmap.pdf") as pdf:
             centrum = c.get("centrum", None)
 
             if aster:
-                draw_asterisms(ax, aster, clip_patch=clip_circle, R=max_radius, linewidth=0.55, alpha=0.60, color="black")
+                draw_asterisms(ax, aster, clip_patch=clip_circle, R=max_radius)
 
             if DRAW_CONSTELLATION_BOUNDARIES and boundaries:
-                draw_boundaries(ax, boundaries, clip_patch=clip_circle, R=max_radius, linewidth=0.45, alpha=0.30, color="black", linestyle="--")
+                draw_boundaries(ax, boundaries, clip_patch=clip_circle, R=max_radius)
 
             if DRAW_CONSTELLATION_LABELS and c.get("name") and centrum:
                 constellation_labels.append((centrum, c["name"]))
 
-    # Étoiles + labels (priorité)
+    # Étoiles
     for star in visible_stars:
         x, y = project_star(star["ra"], star["dec"])
         name, marker_area, marker_color = star_marker_style(star)
@@ -1027,25 +1057,43 @@ with PdfPages("output/starmap.pdf") as pdf:
         sc = ax.scatter(x, y, s=marker_area, color=marker_color)
         clip_artist(sc, clip_circle)
 
-        # Labels d'étoiles (priorité) : anti-chevauchement, au plus proche possible du point de base.
-        # Note: Polaris (ids "Lodestar") est toujours labellisée, même si sa magnitude dépasse le seuil.
-        if name and (name == "Lodestar" or star["V"] <= LABEL_MAG_LIMIT):
+        if name:
             display_name = "Polaris" if name == "Lodestar" else name
-            place_star_label(
-                ax=ax,
-                x=x,
-                y=y,
-                label=display_name,
-                marker_area_points2=marker_area,
-                occupied_bboxes=star_obstacle_bboxes,
-                renderer=label_renderer,
-                clip_patch=clip_circle,
-                disk_R=max_radius,
-                fontsize=5,
-                collision_pad_px=LABEL_COLLISION_PADDING_PX,
-            )
+            force_star = (name == "Lodestar") or is_forced_star_label(display_name)
 
-    # Labels de constellations (après les étoiles => priorité aux labels d'étoiles)
+            if (star["V"] <= LABEL_MAG_LIMIT) or force_star:
+                placed = place_star_label(
+                    ax=ax,
+                    x=x,
+                    y=y,
+                    label=display_name,
+                    marker_area_points2=marker_area,
+                    occupied_bboxes=occupied_bboxes,
+                    renderer=label_renderer,
+                    clip_patch=clip_circle,
+                    disk_R=max_radius,
+                    fontsize=5,
+                    collision_pad_px=LABEL_COLLISION_PADDING_PX,
+                    allow_overlap=False,
+                )
+
+                if placed is None and force_star:
+                    place_star_label(
+                        ax=ax,
+                        x=x,
+                        y=y,
+                        label=display_name,
+                        marker_area_points2=marker_area,
+                        occupied_bboxes=occupied_bboxes,
+                        renderer=label_renderer,
+                        clip_patch=clip_circle,
+                        disk_R=max_radius,
+                        fontsize=5,
+                        collision_pad_px=LABEL_COLLISION_PADDING_PX,
+                        allow_overlap=True,
+                    )
+
+    # Labels constellations
     if constellation_labels:
         for centrum, cname in constellation_labels:
             draw_constellation_label(
@@ -1056,102 +1104,15 @@ with PdfPages("output/starmap.pdf") as pdf:
                 R=max_radius,
                 fontsize=5,
                 alpha=1,
-                occupied_bboxes=star_obstacle_bboxes,
+                occupied_bboxes=occupied_bboxes,
                 renderer=label_renderer,
                 collision_pad_px=LABEL_COLLISION_PADDING_PX,
+                allow_overlap=is_forced_constellation_label(cname),
             )
-
-    # ------------------------------------------------------------
-    # MOIS + JOURS : placement sur les lignes (bords) de la zone rose
-    # ------------------------------------------------------------
-    R_months = R_pink_in + TEXT_PAD_IN
-    R_days = R_pink_out - TEXT_PAD_OUT
-
-    R_day_marker = (R_pink_out - DAY_TICK_OUT_PAD) - DAY_TICK_LEN
-
-    R_month_sep_out = R_pink_out - MONTH_SEPARATOR_OUT_PAD
-    R_month_sep_in = R_pink_in + MONTH_SEPARATOR_IN_PAD
-
-    days_to_show = [5, 10, 15, 20, 25]
-    dates_clip_patch = clip_circle if (CLIP_SKY and CLIP_DATES) else None
-
-    if DRAW_MONTH_SEPARATORS:
-        for m_idx in range(12):
-            doy_sep = day_of_year(m_idx, 1)
-            ra_sep = sun_ra_hours_from_doy(doy_sep)
-            xs0, ys0 = place_on_ring_from_ra(R_month_sep_out, ra_sep)
-            xs1, ys1 = place_on_ring_from_ra(R_month_sep_in, ra_sep)
-            sep, = ax.plot(
-                [xs0, xs1], [ys0, ys1],
-                linewidth=MONTH_SEPARATOR_LW,
-                color=MONTH_SEPARATOR_COLOR,
-                alpha=1.0,
-                zorder=20,
-            )
-            clip_artist(sep, dates_clip_patch)
-
-    for m_idx, m_name in enumerate(months):
-        doy_m = day_of_year(m_idx, 15)
-        ra_m = sun_ra_hours_from_doy(doy_m)
-        x_m, y_m = place_on_ring_from_ra(R_months, ra_m)
-
-        rot_m = get_tangent_rotation(x_m, y_m) + 180
-        t = ax.text(
-            x_m, y_m, m_name.upper(),
-            fontsize=10,
-            rotation=rot_m,
-            rotation_mode="anchor",
-            ha="center",
-            va="center",
-            color="white",
-            fontproperties=gilroy_black,
-        )
-        clip_artist(t, dates_clip_patch)
-
-        for d in days_to_show:
-            if d > MONTH_DAYS[m_idx]:
-                continue
-
-            doy_d = day_of_year(m_idx, d)
-            ra_d = sun_ra_hours_from_doy(doy_d)
-
-            xm, ym = place_on_ring_from_ra(R_day_marker, ra_d)
-            day_marker = plt.Circle(
-                (xm, ym),
-                DAY_MARKER_RADIUS,
-                fill=True,
-                color="white",
-                linewidth=0,
-                zorder=30,
-            )
-            ax.add_patch(day_marker)
-            clip_artist(day_marker, dates_clip_patch)
-
-            x_d, y_d = place_on_ring_from_ra(R_days, ra_d)
-            rot_d = get_tangent_rotation(x_d, y_d) + 180
-            t = ax.text(
-                x_d, y_d, str(d),
-                fontsize=7,
-                rotation=rot_d,
-                rotation_mode="anchor",
-                ha="center",
-                va="center",
-                color="white",
-                fontproperties=dmmono,
-            )
-            clip_artist(t, dates_clip_patch)
-
-    if DRAW_CUT_CIRCLE:
-        cut_r = max_radius * CUT_RADIUS_FACTOR
-        draw_cut_circle(ax, cut_r)
-
-    ax.set_xlim(-outer_radius, outer_radius)
-    ax.set_ylim(-outer_radius, outer_radius)
-    ax.set_aspect("equal")
-    ax.axis("off")
 
     fig.text(
-        0.5, TITLE_Y,
+        0.5,
+        TITLE_Y,
         f"Carte du ciel - Latitude {LATITUDE}°",
         ha="center",
         fontsize=14,
@@ -1161,7 +1122,7 @@ with PdfPages("output/starmap.pdf") as pdf:
     plt.close(fig)
 
     # ======================
-    # PAGE 2 : MASQUE + ZONE BLEUE (HEURES) + CARDINAUX + AXE N-S
+    # PAGE 2 : MASQUE + HEURES
     # ======================
     fig2 = plt.figure(figsize=FIGURE_SIZE_A4_IN)
     ax2 = fig2.add_axes([MARGIN_LEFT, MARGIN_BOTTOM, MARGIN_WIDTH, MARGIN_HEIGHT])
@@ -1184,31 +1145,12 @@ with PdfPages("output/starmap.pdf") as pdf:
 
     hx = np.asarray(x_hor)
     hy = np.asarray(y_hor)
+
     wx, wy = build_horizon_window_polygon(hx, hy, max_radius)
     ax2.fill(wx, wy, color=PAPER_COLOR, linewidth=0)
+
     window_poly = Polygon(np.column_stack([wx, wy]), closed=True, facecolor="none", edgecolor="none")
     ax2.add_patch(window_poly)
-
-    if DRAW_HORIZON_TOP_TEXT:
-        draw_horizon_top_text(ax2, HORIZON_TOP_TEXT, max_radius, HORIZON_TOP_TEXT_PADDING)
-
-    if DRAW_ZENITH_MARKER:
-        zx, zy = get_zenith_xy(LATITUDE)
-        if is_inside_disk_xy(zx, zy, max_radius):
-            zenith_marker = plt.Circle(
-                (zx, zy),
-                ZENITH_MARKER_RADIUS,
-                fill=True,
-                color=ZENITH_MARKER_COLOR,
-                linewidth=0,
-                zorder=25,
-            )
-            zenith_marker.set_clip_path(window_poly)
-            ax2.add_patch(zenith_marker)
-
-    if DRAW_VERTICAL_WINDOW_LINE:
-        ns_line, = ax2.plot([0, 0], [max_radius, -max_radius], color="black", linewidth=WINDOW_LINE_WIDTH)
-        ns_line.set_clip_path(window_poly)
 
     if DRAW_CARDINALS_ON_HORIZON:
         draw_cardinals_on_horizon(ax2, hx, hy, CARDINAL_OFFSET)
@@ -1223,11 +1165,14 @@ with PdfPages("output/starmap.pdf") as pdf:
     R_hour_tick_30 = R_hour_tick_base + 3.0
     R_hour_tick_60 = R_hour_tick_base + 4.2
 
-    R_hour_tick_15 = min(R_hour_tick_15, R_blue_out - 0.2)
-    R_hour_tick_30 = min(R_hour_tick_30, R_blue_out - 0.2)
-    R_hour_tick_60 = min(R_hour_tick_60, R_blue_out - 0.2)
-
-    draw_hour_ring(ax2, R_hours_text, R_hour_tick_base, R_hour_tick_15, R_hour_tick_30, R_hour_tick_60)
+    draw_hour_ring(
+        ax2,
+        R_hours_text,
+        R_hour_tick_base,
+        R_hour_tick_15,
+        R_hour_tick_30,
+        R_hour_tick_60,
+    )
 
     if DRAW_CUT_CIRCLE:
         cut_r = max_radius * CUT_RADIUS_FACTOR
@@ -1239,7 +1184,8 @@ with PdfPages("output/starmap.pdf") as pdf:
     ax2.axis("off")
 
     fig2.text(
-        0.5, TITLE_Y,
+        0.5,
+        TITLE_Y,
         "Masque d'horizon + anneau des heures",
         ha="center",
         fontsize=14,
@@ -1247,3 +1193,8 @@ with PdfPages("output/starmap.pdf") as pdf:
 
     pdf.savefig(fig2)
     plt.close(fig2)
+
+# Remplacement atomique une fois le PDF terminé
+os.replace(tmp_pdf, final_pdf)
+
+print(f"PDF généré : {final_pdf}")
