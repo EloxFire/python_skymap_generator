@@ -4,10 +4,12 @@ import math
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
-from matplotlib.patches import Polygon
+from matplotlib.patches import Polygon, PathPatch
+from matplotlib.path import Path
 from matplotlib.transforms import Bbox
 from matplotlib import font_manager as fm
 import matplotlib.image as mpimg
+import matplotlib.patheffects as pe
 
 # ============================================================
 # PARAMÈTRES
@@ -18,6 +20,7 @@ LABEL_MAG_LIMIT = 1  # seuil pour afficher le nom des étoiles
 STAR_LABEL_GAP_PT = 2  # espace visuel constant entre le bord du marqueur et son libellé
 LABEL_COLLISION_PADDING_PX = 0
 STAR_DOT_COLLISION_PADDING_PX = 1.0
+LABEL_DISK_MARGIN = 6  # marge en unités carte pour garder les labels dans le disque
 
 # Constellations
 CONSTELLATIONS_FILE = "constellations_fr.json"
@@ -57,8 +60,18 @@ MASK_COLOR = "#000000"  # disque plein
 PAPER_COLOR = "white"   # couleur simulant la transparence (papier blanc)
 DRAW_HORIZON_OUTLINE_ON_MASK = True
 NAMED_STAR_COLOR = "#FF0000"
+STAR_DEFAULT_COLOR = "black"
+CONST_LINE_COLOR = "#444444"
+CONST_LABEL_COLOR = "#333333"
 CONSTELLATION_LINE_ZORDER = 10
 STAR_DOT_ZORDER = 20
+
+# Voie Lactée
+MW_FILE = "mw.json"
+DRAW_MILKY_WAY = True
+MW_COLOR = "#b8c8d8"   # bleu-gris clair pour impression sur blanc
+MW_ALPHA_MIN = 0.35    # couche externe (ol1)
+MW_ALPHA_MAX = 0.55    # couche interne / noyau galactique (ol5)
 
 # Trait N-S à travers la fenêtre (visible uniquement dans la fenêtre blanche)
 DRAW_VERTICAL_WINDOW_LINE = True
@@ -451,6 +464,7 @@ def place_star_label(ax, x, y, label, marker_area_points2, occupied_bboxes, rend
                 fontproperties=gilroy_black,
                 zorder=80,
             )
+            t.set_path_effects([pe.withStroke(linewidth=2.5, foreground="white")])
             clip_artist(t, clip_patch)
 
             ok = register_text_if_no_overlap(
@@ -469,12 +483,10 @@ def place_star_label(ax, x, y, label, marker_area_points2, occupied_bboxes, rend
 
 
 def star_marker_style(star):
-    size = max(1, 2.5 - star["V"])
+    size = max(1, 2.5 - star["V"]) ** 2
     name = extract_star_name(star.get("ids"))
     is_labeled = bool(name and (name == "Lodestar" or star["V"] <= LABEL_MAG_LIMIT))
-    if is_labeled:
-        return name, size ** 2, NAMED_STAR_COLOR
-    return name, size ** 2, "black"
+    return name, size, NAMED_STAR_COLOR if is_labeled else STAR_DEFAULT_COLOR
 
 
 def marker_bbox_from_data(ax, x, y, area_points2, pad_px=0.0):
@@ -487,6 +499,15 @@ def marker_bbox_from_data(ax, x, y, area_points2, pad_px=0.0):
         y_px + radius_px,
     )
     return padded_bbox(bbox, pad_px=pad_px)
+
+
+def setup_map_ax(fig, outer_r):
+    ax = fig.add_axes([MARGIN_LEFT, MARGIN_BOTTOM, MARGIN_WIDTH, MARGIN_HEIGHT])
+    ax.set_xlim(-outer_r, outer_r)
+    ax.set_ylim(-outer_r, outer_r)
+    ax.set_aspect("equal")
+    ax.axis("off")
+    return ax
 
 
 def add_annulus(ax, r_in, r_out, color, alpha=1.0, zorder=0):
@@ -615,6 +636,73 @@ def draw_boundaries(ax, boundary_loops, clip_patch=None, R=None, linewidth=0.45,
         flush()
 
 
+def _project_ring(ring):
+    xs, ys = [], []
+    prev_ra = None
+    for pt in ring:
+        ra, dec = float(pt[0]), float(pt[1])
+        if prev_ra is not None:
+            prev_ra, ra = unwrap_ra_pair(prev_ra, ra)
+        x, y = project_star(ra, dec)
+        xs.append(x)
+        ys.append(y)
+        prev_ra = ra
+    return xs, ys
+
+
+def _rings_to_path(rings):
+    """Combine plusieurs anneaux GeoJSON en un Path composé (exterior + trous)."""
+    verts, codes = [], []
+    for ring in rings:
+        xs, ys = _project_ring(ring)
+        if len(xs) < 3:
+            continue
+        n = len(xs)
+        verts.extend(zip(xs, ys))
+        codes += [Path.MOVETO] + [Path.LINETO] * (n - 1)
+        codes[-1] = Path.CLOSEPOLY
+    return Path(verts, codes) if verts else None
+
+
+def draw_milky_way(ax, clip_patch=None):
+    if not DRAW_MILKY_WAY:
+        return
+    try:
+        with open(MW_FILE, "r", encoding="utf-8") as f:
+            mw = json.load(f)
+    except FileNotFoundError:
+        print(f"[WARN] {MW_FILE} introuvable – voie lactée ignorée")
+        return
+
+    features = mw.get("features", [])
+    n = len(features)
+    if n == 0:
+        return
+
+    for i, feature in enumerate(features):
+        t = i / max(n - 1, 1)
+        alpha = MW_ALPHA_MIN + t * (MW_ALPHA_MAX - MW_ALPHA_MIN)
+
+        geom = feature.get("geometry", {})
+        gtype = geom.get("type", "")
+        polygons = geom.get("coordinates", [])
+        if gtype == "Polygon":
+            polygons = [polygons]
+        elif gtype != "MultiPolygon":
+            continue
+
+        for poly in polygons:
+            # poly = [exterior_ring, hole1, hole2, ...]
+            # On combine en un seul Path : le fill nonzero coupe les trous (CW)
+            path = _rings_to_path(poly)
+            if path is None:
+                continue
+            patch = PathPatch(path, facecolor=MW_COLOR, edgecolor="none",
+                              alpha=alpha, linewidth=0, zorder=-5)
+            ax.add_patch(patch)
+            clip_artist(patch, clip_patch)
+
+
 def offset_radially(x, y, delta):
     r = np.hypot(x, y)
     if r == 0:
@@ -677,10 +765,11 @@ def draw_constellation_label(
                 ha="center",
                 va="center",
                 alpha=alpha,
-                color="black",
+                color=CONST_LABEL_COLOR,
                 fontproperties=gilroy_medium,
                 zorder=60,
             )
+            t.set_path_effects([pe.withStroke(linewidth=2.0, foreground="white")])
             clip_artist(t, clip_patch)
 
             ok = register_text_if_no_overlap(
@@ -1016,18 +1105,17 @@ def draw_cut_circle(ax, radius):
 # ============================================================
 # EXPORT PDF
 # ============================================================
+OUTPUT_PATH = "output/starmap.pdf"
 os.makedirs("output", exist_ok=True)
+if os.path.exists(OUTPUT_PATH):
+    os.remove(OUTPUT_PATH)
 
-with PdfPages("output/starmap.pdf") as pdf:
+with PdfPages(OUTPUT_PATH) as pdf:
     # ======================
     # PAGE 1 : CARTE DU CIEL + ZONE ROSE (MOIS + JOURS)
     # ======================
     fig = plt.figure(figsize=FIGURE_SIZE_A4_IN)
-    ax = fig.add_axes([MARGIN_LEFT, MARGIN_BOTTOM, MARGIN_WIDTH, MARGIN_HEIGHT])
-    ax.set_xlim(-outer_radius, outer_radius)
-    ax.set_ylim(-outer_radius, outer_radius)
-    ax.set_aspect("equal")
-    ax.axis("off")
+    ax = setup_map_ax(fig, outer_radius)
 
     R_pink_in = max_radius * PINK_IN
     R_pink_out = max_radius * PINK_OUT
@@ -1046,6 +1134,8 @@ with PdfPages("output/starmap.pdf") as pdf:
     ax.add_patch(border_circle)
 
     clip_circle = plt.Circle((0, 0), max_radius, transform=ax.transData) if CLIP_SKY else None
+
+    draw_milky_way(ax, clip_patch=clip_circle)
 
     fig.canvas.draw()
     label_renderer = fig.canvas.get_renderer()
@@ -1084,10 +1174,10 @@ with PdfPages("output/starmap.pdf") as pdf:
             centrum = c.get("centrum", None)
 
             if aster:
-                draw_asterisms(ax, aster, clip_patch=clip_circle, R=max_radius, linewidth=0.55, alpha=0.60, color="black")
+                draw_asterisms(ax, aster, clip_patch=clip_circle, R=max_radius, linewidth=0.55, alpha=0.65, color=CONST_LINE_COLOR)
 
             if DRAW_CONSTELLATION_BOUNDARIES and boundaries:
-                draw_boundaries(ax, boundaries, clip_patch=clip_circle, R=max_radius, linewidth=0.45, alpha=0.30, color="black", linestyle="--")
+                draw_boundaries(ax, boundaries, clip_patch=clip_circle, R=max_radius, linewidth=0.45, alpha=0.30, color=CONST_LINE_COLOR, linestyle="--")
 
             if DRAW_CONSTELLATION_LABELS and c.get("name") and centrum:
                 constellation_labels.append((centrum, c["name"]))
@@ -1117,8 +1207,8 @@ with PdfPages("output/starmap.pdf") as pdf:
                 renderer=label_renderer,
                 extra_bboxes=None if forced_star else star_dot_bboxes,
                 clip_patch=clip_circle,
-                disk_R=max_radius,
-                fontsize=5,
+                disk_R=max_radius - LABEL_DISK_MARGIN,
+                fontsize=6,
                 collision_pad_px=LABEL_COLLISION_PADDING_PX,
                 color=marker_color,
             )
@@ -1132,8 +1222,8 @@ with PdfPages("output/starmap.pdf") as pdf:
                 centrum,
                 cname,
                 clip_patch=clip_circle,
-                R=max_radius,
-                fontsize=5,
+                R=max_radius - LABEL_DISK_MARGIN,
+                fontsize=6,
                 alpha=1,
                 occupied_bboxes=label_bboxes,
                 renderer=label_renderer,
@@ -1222,13 +1312,7 @@ with PdfPages("output/starmap.pdf") as pdf:
             clip_artist(t, dates_clip_patch)
 
     if DRAW_CUT_CIRCLE:
-        cut_r = max_radius * CUT_RADIUS_FACTOR
-        draw_cut_circle(ax, cut_r)
-
-    ax.set_xlim(-outer_radius, outer_radius)
-    ax.set_ylim(-outer_radius, outer_radius)
-    ax.set_aspect("equal")
-    ax.axis("off")
+        draw_cut_circle(ax, max_radius * CUT_RADIUS_FACTOR)
 
     fig.text(
         0.5, TITLE_Y,
@@ -1244,7 +1328,7 @@ with PdfPages("output/starmap.pdf") as pdf:
     # PAGE 2 : MASQUE + ZONE BLEUE (HEURES) + CARDINAUX + AXE N-S
     # ======================
     fig2 = plt.figure(figsize=FIGURE_SIZE_A4_IN)
-    ax2 = fig2.add_axes([MARGIN_LEFT, MARGIN_BOTTOM, MARGIN_WIDTH, MARGIN_HEIGHT])
+    ax2 = setup_map_ax(fig2, outer_radius)
 
     R_blue_in = max_radius * BLUE_IN
     R_blue_out = max_radius * BLUE_OUT
@@ -1327,13 +1411,7 @@ with PdfPages("output/starmap.pdf") as pdf:
     draw_hour_ring(ax2, R_hours_text, R_hour_tick_base, R_hour_tick_15, R_hour_tick_30, R_hour_tick_60)
 
     if DRAW_CUT_CIRCLE:
-        cut_r = max_radius * CUT_RADIUS_FACTOR
-        draw_cut_circle(ax2, cut_r)
-
-    ax2.set_xlim(-outer_radius, outer_radius)
-    ax2.set_ylim(-outer_radius, outer_radius)
-    ax2.set_aspect("equal")
-    ax2.axis("off")
+        draw_cut_circle(ax2, max_radius * CUT_RADIUS_FACTOR)
 
     fig2.text(
         0.5, TITLE_Y,
