@@ -20,7 +20,15 @@ LABEL_MAG_LIMIT = 1  # seuil pour afficher le nom des étoiles
 STAR_LABEL_GAP_PT = 2  # espace visuel constant entre le bord du marqueur et son libellé
 LABEL_COLLISION_PADDING_PX = 0
 STAR_DOT_COLLISION_PADDING_PX = 1.0
+CONST_LABEL_AVOID_STAR_DOTS = False  # si False, les labels de constellations peuvent chevaucher les étoiles
 LABEL_DISK_MARGIN = 6  # marge en unités carte pour garder les labels dans le disque
+
+# Traits de rappel label → objet
+DRAW_LEADER_LINES = True
+LEADER_LINE_LW = 0.4
+LEADER_LINE_ALPHA = 0.55
+LEADER_STAR_MIN_STEP_PT = 4.0      # distance min (pt) à partir de laquelle tracer le trait
+LEADER_CONST_MIN_DU = 3.0          # distance min (unités carte) pour les constellations
 
 # Constellations
 CONSTELLATIONS_FILE = "constellations_fr.json"
@@ -48,7 +56,8 @@ FORCED_CONSTELLATION_NAMES = [
 FORCED_STAR_NAMES = [
     "Polaris",
     "Arcturus",
-    "Spica"
+    "Spica",
+    "Capella",
 ]
 
 # Clipping
@@ -443,7 +452,7 @@ def place_star_label(ax, x, y, label, marker_area_points2, occupied_bboxes, rend
         directions = [(-1.0, 0.0), (0.0, 1.0), (0.0, -1.0), (1.0, 0.0),
                       (-0.7, 0.7), (-0.7, -0.7), (0.7, 0.7), (0.7, -0.7)]
 
-    distance_steps_pt = [0.0, 1.5, 3.0, 5.0, 7.0, 9.0, 12.0]
+    distance_steps_pt = [0.0, 1.5, 3.0, 5.0, 7.0]
 
     for step in distance_steps_pt:
         dist = base_offset_pt + step
@@ -464,7 +473,7 @@ def place_star_label(ax, x, y, label, marker_area_points2, occupied_bboxes, rend
                 fontproperties=gilroy_black,
                 zorder=80,
             )
-            t.set_path_effects([pe.withStroke(linewidth=2.5, foreground="white")])
+            t.set_path_effects([pe.withStroke(linewidth=1.5, foreground="white")])
             clip_artist(t, clip_patch)
 
             ok = register_text_if_no_overlap(
@@ -477,6 +486,12 @@ def place_star_label(ax, x, y, label, marker_area_points2, occupied_bboxes, rend
                 register_bbox=True,
             )
             if ok:
+                if DRAW_LEADER_LINES and step > LEADER_STAR_MIN_STEP_PT:
+                    leader, = ax.plot([x, tx], [y, ty],
+                                      lw=LEADER_LINE_LW, color=color,
+                                      alpha=LEADER_LINE_ALPHA, zorder=79,
+                                      solid_capstyle="round")
+                    clip_artist(leader, clip_patch)
                 return t
 
     return None
@@ -650,18 +665,47 @@ def _project_ring(ring):
     return xs, ys
 
 
+def _signed_area(xs, ys):
+    xa, ya = np.array(xs), np.array(ys)
+    return 0.5 * float(np.sum(xa[:-1] * ya[1:] - xa[1:] * ya[:-1]))
+
+
 def _rings_to_path(rings):
-    """Combine plusieurs anneaux GeoJSON en un Path composé (exterior + trous)."""
-    verts, codes = [], []
+    """Combine plusieurs anneaux GeoJSON en un Path composé pour fill nonzero.
+
+    En projection polaire, certains anneaux ont leur sens de rotation apparent
+    inversé par rapport au sens sphérique. On détecte l'anneau extérieur comme
+    celui qui a la plus grande aire signée absolue, puis les trous sont forcés
+    en sens inverse (CW) pour que la règle nonzero les soustraie correctement.
+    """
+    projected = []
     for ring in rings:
         xs, ys = _project_ring(ring)
-        if len(xs) < 3:
-            continue
+        if len(xs) >= 3:
+            projected.append((xs, ys, _signed_area(xs, ys)))
+
+    if not projected:
+        return None
+
+    # L'anneau avec la plus grande aire absolue est l'enveloppe extérieure
+    projected.sort(key=lambda t: abs(t[2]), reverse=True)
+
+    verts, codes = [], []
+    for i, (xs, ys, area) in enumerate(projected):
+        if i == 0:
+            # Extérieur : doit être CCW (aire > 0) pour nonzero fill
+            if area < 0:
+                xs, ys = xs[::-1], ys[::-1]
+        else:
+            # Trous : doivent être CW (aire < 0)
+            if area > 0:
+                xs, ys = xs[::-1], ys[::-1]
         n = len(xs)
         verts.extend(zip(xs, ys))
         codes += [Path.MOVETO] + [Path.LINETO] * (n - 1)
         codes[-1] = Path.CLOSEPOLY
-    return Path(verts, codes) if verts else None
+
+    return Path(verts, codes)
 
 
 def draw_milky_way(ax, clip_patch=None):
@@ -739,8 +783,8 @@ def draw_constellation_label(
 
     x0, y0 = project_star(float(centrum["ra"]), float(centrum["dec"]))
 
-    radial_offsets = [0.0, 1.2, -1.2, 2.5, -2.5, 4.0, -4.0, 6.0, -6.0, 8.0, -8.0]
-    tangential_offsets = [0.0, -1.5, 1.5, -3.0, 3.0, -4.5, 4.5, -6.0, 6.0]
+    radial_offsets = [0.0, 1.2, -1.2, 2.5, -2.5, 4.0, -4.0, 5.5, -5.5]
+    tangential_offsets = [0.0, -1.5, 1.5, -3.0, 3.0, -4.5, 4.5]
 
     best = None
     best_d2 = None
@@ -769,7 +813,7 @@ def draw_constellation_label(
                 fontproperties=gilroy_medium,
                 zorder=60,
             )
-            t.set_path_effects([pe.withStroke(linewidth=2.0, foreground="white")])
+            t.set_path_effects([pe.withStroke(linewidth=1.2, foreground="white")])
             clip_artist(t, clip_patch)
 
             ok = register_text_if_no_overlap(
@@ -798,6 +842,14 @@ def draw_constellation_label(
 
     if best is not None and occupied_bboxes is not None and best_bbox is not None:
         occupied_bboxes.append(best_bbox)
+
+    if best is not None and DRAW_LEADER_LINES and best_d2 > LEADER_CONST_MIN_DU ** 2:
+        tx_b, ty_b = best.get_position()
+        leader, = ax.plot([x0, tx_b], [y0, ty_b],
+                          lw=LEADER_LINE_LW, color=CONST_LABEL_COLOR,
+                          alpha=LEADER_LINE_ALPHA, zorder=55,
+                          solid_capstyle="round")
+        clip_artist(leader, clip_patch)
 
     return best
 
@@ -1228,7 +1280,7 @@ with PdfPages(OUTPUT_PATH) as pdf:
                 occupied_bboxes=label_bboxes,
                 renderer=label_renderer,
                 collision_pad_px=LABEL_COLLISION_PADDING_PX,
-                extra_bboxes=None if forced_const else star_dot_bboxes,
+                extra_bboxes=None if (forced_const or not CONST_LABEL_AVOID_STAR_DOTS) else star_dot_bboxes,
             )
 
     # ------------------------------------------------------------
